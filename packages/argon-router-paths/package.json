@@ -40,17 +40,5 @@
   },
   "bugs": {
     "url": "https://github.com/movpushmov/argon-router/issues"
-  },
-  "peerDependencies": {
-    "effector": ">=23",
-    "patronum": ">=2.2"
-  },
-  "devDependencies": {
-    "@types/history": "^4.7.11"
-  },
-  "dependencies": {
-    "path-to-regexp": "^8.2.0",
-    "query-string": "^9.1.1",
-    "typed-url-params": "^1.0.1"
   }
 }

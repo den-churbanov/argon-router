@@ -49,15 +49,17 @@ export type UrlParameter<T extends string> =
 type UrlParams<
   T extends string,
   Result = void,
-> = T extends `/:${infer Parameter extends string}/${infer Route}`
+> = T extends `/:${infer Parameter}/${infer Route}`
   ? Result extends void
     ? UrlParams<`/${Route}`, UrlParameter<`:${Parameter}`>>
     : UrlParams<`/${Route}`, Result & UrlParameter<`:${Parameter}`>>
-  : T extends `/:${infer Parameter extends string}`
+  : T extends `/:${infer Parameter}`
     ? Result extends void
       ? UrlParameter<`:${Parameter}`>
       : Result & UrlParameter<`:${Parameter}`>
-    : Result;
+    : T extends `/${infer Static}/${infer Next}`
+      ? UrlParams<`/${Next}`, Result>
+      : Result;
 
 type Unwrap<Result extends UrlParams<any, void>> = {
   [k in keyof Result]: Result[k];

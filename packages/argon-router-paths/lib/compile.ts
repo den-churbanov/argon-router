@@ -1,44 +1,178 @@
+import { ParseUrlParams } from './types';
+
 type RawRules = {
   required: boolean;
   type: 'string' | 'number' | { type: 'union'; values: string[] };
   array?: { minLength?: number; maxLength?: number };
 };
 
-type RawBlock = {
-  name: string;
-  rules: RawRules;
+type UrlControls = {
+  getInput: (input?: string) => string | void;
+  next: () => void;
 };
 
-type Validator = (input?: string) => boolean;
+type Validator = (props: UrlControls) => boolean;
+type Parser = (props: UrlControls) => any;
 
-type Block = {
-  name: string;
-  validator: Validator;
-  parser: (input?: string) => any;
-};
+type Block =
+  | {
+      type: 'parameter';
+      name: string;
+      validator: Validator;
+      parser: Parser;
+      required: boolean;
+    }
+  | { type: 'part'; value: string };
+
+function createControls(blocks: any[], startPosition: number): UrlControls {
+  let i = startPosition;
+  let current = blocks[startPosition];
+
+  return {
+    getInput: () => current,
+    next: () => {
+      i++;
+      current = blocks[i];
+    },
+  };
+}
 
 function generateValidator(rules: RawRules): Validator {
-  return (input?: string) => {
+  function baseValidator(input?: string) {
     if (rules.required && !input) {
       return false;
     }
 
+    if (!input) {
+      return true;
+    }
+
+    if (typeof rules.type === 'object') {
+      switch (rules.type.type) {
+        case 'union': {
+          return rules.type.values.includes(input);
+        }
+      }
+    }
+
+    switch (rules.type) {
+      case 'number': {
+        return !isNaN(parseInt(input));
+      }
+      case 'string': {
+        return true;
+      }
+    }
+  }
+
+  return ({ getInput, next }) => {
     if (rules.array) {
       const { minLength, maxLength } = rules.array;
-      const parsed = input!.split(',');
+
+      let current;
+      const result: any[] = [];
+
+      while (
+        (current = getInput()) &&
+        result.length < (maxLength ?? Infinity)
+      ) {
+        if (!baseValidator(current)) {
+          return false;
+        }
+
+        result.push(true);
+        next();
+      }
 
       if (
-        parsed.length > (maxLength ?? Infinity) ||
-        parsed.length < (minLength ?? 0)
+        result.length > (maxLength ?? Infinity) ||
+        result.length < (minLength ?? 0)
       ) {
         return false;
       }
-    } else {
+
+      return true;
     }
+
+    const input = getInput();
+
+    if (rules.required && !input) {
+      return false;
+    }
+
+    if (!input) {
+      return true;
+    }
+
+    return baseValidator(input);
   };
 }
 
-export function compile<T extends string>(path: T) {
+function generateParser(rules: RawRules): Parser {
+  function baseParser(input?: string) {
+    if (rules.required && !input) {
+      return null;
+    }
+
+    if (!input) {
+      return undefined;
+    }
+
+    if (rules.type === 'number') {
+      return parseInt(input);
+    }
+
+    return input;
+  }
+
+  return ({ getInput, next }) => {
+    const input = getInput();
+
+    if (rules.array) {
+      const { minLength, maxLength } = rules.array;
+
+      let current;
+
+      const result: any[] = [];
+
+      while (
+        (current = getInput()) &&
+        result.length < (maxLength ?? Infinity)
+      ) {
+        result.push(baseParser(current));
+        next();
+      }
+
+      if (
+        result.length > (maxLength ?? Infinity) ||
+        result.length < (minLength ?? 0)
+      ) {
+        return undefined;
+      }
+
+      return result;
+    }
+
+    if (rules.required && !input) {
+      return null;
+    }
+
+    if (!input) {
+      return undefined;
+    }
+
+    return baseParser(input);
+  };
+}
+
+type CompileResult<Params> = {
+  parse(input: string): { path: string; params: Params } | null;
+  build(params: Params): string;
+};
+
+export function compile<T extends string, Params = ParseUrlParams<T>>(
+  path: T,
+): CompileResult<Params> {
   const blocks: Block[] = [];
 
   const regexp = /:(\w+)(<[\w|]+>)?([+*?])?/;
@@ -55,12 +189,14 @@ export function compile<T extends string>(path: T) {
     const matches = block.match(regexp);
 
     if (!matches) {
+      blocks.push({ type: 'part', value: block });
+
       continue;
     }
 
-    const name = matches[0];
-    const generic = matches[1];
-    const modificator = matches[2];
+    const name = matches[1];
+    const generic = matches[2];
+    const modificator = matches[3];
 
     if (!name) {
       throw new Error(
@@ -68,64 +204,134 @@ export function compile<T extends string>(path: T) {
       );
     }
 
-    const result: RawBlock = { name, validator: () => true };
+    const rules: RawRules = {
+      required: true,
+      type: 'string',
+    };
 
     if (generic) {
       const type = generic.replace('<', '').replace('>', '');
 
       if (type === 'number') {
-        result.validator = (input?: string) =>
-          input !== undefined && !isNaN(parseInt(input));
+        rules.type = 'number';
       }
 
       if (type.includes('|')) {
-        const parsed = type.split('|').filter(Boolean);
-        result.validator = (input?: string) =>
-          input !== undefined && parsed.includes(input);
+        rules.type = {
+          type: 'union',
+          values: type.split('|').filter(Boolean),
+        };
       }
     }
 
     switch (modificator) {
       case '*': {
+        rules.array = {};
         break;
       }
       case '+': {
+        rules.array = { minLength: 1 };
         break;
       }
       case '?': {
-        if (i + 1 < parsedBlocks.length) {
-          throw new Error(
-            `Invalid path: "${path}". Optional parameters cannot be defined not in the end of path`,
-          );
-        }
-
-        result.validator = input;
-
+        rules.required = false;
         break;
       }
     }
 
-    blocks.push(result);
+    blocks.push({
+      type: 'parameter',
+      name,
+      required: rules.required,
+      validator: generateValidator(rules),
+      parser: generateParser(rules),
+    });
+  }
+
+  function stringifyParam(param: unknown): string {
+    if (Array.isArray(param)) {
+      return param.length === 0
+        ? ''
+        : param.map((item) => stringifyParam(item)).join('/');
+    }
+
+    if (typeof param === 'object') {
+      throw new Error("Paths doesn't support object parameters");
+    }
+
+    if (!param) {
+      return '';
+    }
+
+    return param.toString();
   }
 
   return {
     /**
      * @param input input path
-     * @returns `{ path: string; params: Params }` | `void`
+     * @returns `{ path: string; params: Params }` | `null`
      */
-    parse(input: string) {},
+    parse(input: string): { path: string; params: Params } | null {
+      const parsed = decodeURI(input).split('/').filter(Boolean);
+      let params: any = null;
 
-    build() {},
+      for (let i = 0; i < blocks.length; i++) {
+        const compiledBlock = blocks[i];
+        const rawBlock = parsed[i];
+
+        if (compiledBlock.type === 'part') {
+          if (compiledBlock.value !== rawBlock) {
+            return null;
+          }
+
+          continue;
+        }
+
+        if (!compiledBlock.validator(createControls(parsed, i))) {
+          return null;
+        }
+
+        const parsedPayload = compiledBlock.parser(createControls(parsed, i));
+
+        if (parsedPayload === null) {
+          return null;
+        }
+
+        if (!params) {
+          params = {};
+        }
+
+        params[compiledBlock.name] = parsedPayload;
+      }
+
+      return { path: input, params };
+    },
+
+    build(params: Params): string {
+      const anyParams = params as any;
+
+      const result: string[] = [];
+
+      for (const block of blocks) {
+        if (block.type === 'part') {
+          result.push(block.value);
+          continue;
+        }
+
+        if (!anyParams[block.name] && block.required) {
+          throw new Error(
+            `Cannot build path without required parameter: "${block.name}"`,
+          );
+        }
+
+        if (!anyParams[block.name] && !block.required) {
+          continue;
+        }
+
+        result.push(stringifyParam(anyParams[block.name]));
+      }
+
+      return encodeURI(`/${result.filter(Boolean).join('/')}`);
+    },
   };
 }
-
-compile('/:name');
-console.log('\n\n\n\n\n');
-compile('/name');
-console.log('\n\n\n\n\n');
-compile('/:name<number>');
-console.log('\n\n\n\n\n');
-//compile('/:name<number>+');
-console.log('\n\n\n\n\n');
-//compile('/:name<world|hello>+');
-console.log('\n\n\n\n\n');
